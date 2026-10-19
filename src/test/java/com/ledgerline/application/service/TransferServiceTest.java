@@ -3,6 +3,7 @@ package com.ledgerline.application.service;
 import com.ledgerline.application.dto.TransferLegRequest;
 import com.ledgerline.application.dto.TransferRequest;
 import com.ledgerline.application.dto.TransferResponse;
+import com.ledgerline.application.strategy.OrderedPessimisticStrategy;
 import com.ledgerline.domain.exception.AccountNotFoundException;
 import com.ledgerline.domain.exception.ImbalancedJournalEntryException;
 import com.ledgerline.domain.model.Account;
@@ -40,7 +41,8 @@ class TransferServiceTest {
 
     @BeforeEach
     void setUp() {
-        transferService = new TransferService(accountRepository, journalEntryRepository);
+        OrderedPessimisticStrategy strategy = new OrderedPessimisticStrategy(accountRepository, journalEntryRepository);
+        transferService = new TransferService(List.of(strategy));
     }
 
     @Test
@@ -100,7 +102,7 @@ class TransferServiceTest {
         );
 
         when(accountRepository.findByIdInOrderByIdAscForUpdate(any()))
-                .thenReturn(List.of(account)); // Only presentId is returned
+                .thenReturn(List.of(account));
 
         assertThatThrownBy(() -> transferService.executeTransfer(request))
                 .isInstanceOf(AccountNotFoundException.class)
