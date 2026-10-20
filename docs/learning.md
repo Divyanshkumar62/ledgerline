@@ -90,15 +90,15 @@ To eliminate deadlocks, we don't need distributed coordination or complicated lo
 
 > **Rule**: When acquiring locks on multiple accounts, always acquire them in **ascending UUID order**, regardless of transfer direction.
 
-In [TransferService.java](file:///c:/dungeon/ledgerline/src/main/java/com/ledgerline/application/service/TransferService.java):
+In [TransferPlan.java](../src/main/java/com/ledgerline/application/strategy/TransferPlan.java) and [OrderedPessimisticStrategy.java](../src/main/java/com/ledgerline/application/strategy/OrderedPessimisticStrategy.java):
 ```java
-List<UUID> sortedAccountIds = request.legs().stream()
+List<UUID> ids = request.legs().stream()
         .map(TransferLegRequest::accountId)
         .distinct()
-        .sorted()
+        .sorted(LOCK_ORDER)          // UUID::toString, same order as PostgreSQL
         .toList();
 
-List<Account> lockedAccounts = accountRepository.findByIdInOrderByIdAscForUpdate(sortedAccountIds);
+accountRepository.findByIdInOrderByIdAscForUpdate(ids);   // one statement: ORDER BY id ... FOR UPDATE
 ```
 
 Because both Thread 1 and Thread 2 are forced to lock Account A *before* Account B, whichever thread acquires Account A first will proceed to Account B without blocking, while the second thread waits cleanly for Account A. Circular wait becomes mathematically impossible.
@@ -110,7 +110,13 @@ A crucial real-world trap encountered during testing:
 // If mostSignificantBits has the high bit set (0x80000000... to 0xFFFFFFFF...),
 // Java evaluates it as a NEGATIVE number!
 ```
-Therefore, `ffffffff-ffff-ffff-ffff-ffffffffffff` sorts *before* `00000000-0000-0000-0000-000000000001` in Java's in-memory sort! Both your application sorting and repository ordering must remain synchronized to preserve the deadlock guarantee.
+Therefore, `ffffffff-ffff-ffff-ffff-ffffffffffff` sorts *before* `00000000-0000-0000-0000-000000000001` in Java's in-memory sort, while PostgreSQL (unsigned bytes) sorts it last.
+
+When does that matter? Only when **Java's order is the lock order**:
+* Strategy A locks every row in *one* SQL statement, so PostgreSQL's `ORDER BY` decides and the Java sort is irrelevant.
+* Strategy C issues one `UPDATE` per account, so Java's iteration order *is* the lock order. If two transactions sorted differently, they could deadlock.
+
+The fix is `Comparator.comparing(UUID::toString)`: canonical lowercase hex compares character by character exactly like unsigned bytes, so Java and PostgreSQL agree.
 
 ---
 
@@ -127,7 +133,7 @@ In a relational database, multi-leg postings must be inserted one row at a time.
 3. Only after `INSERT INTO postings (account_id, 'CREDIT', 100)` does the entry balance out to zero.
 
 ### The Solution: `DEFERRABLE INITIALLY DEFERRED`
-In [V1__init_ledger_schema.sql](file:///c:/dungeon/ledgerline/src/main/resources/db/migration/V1__init_ledger_schema.sql):
+In [V1__init_ledger_schema.sql](../src/main/resources/db/migration/V1__init_ledger_schema.sql):
 ```sql
 CREATE CONSTRAINT TRIGGER trg_postings_zero_sum
 AFTER INSERT ON postings
@@ -173,12 +179,13 @@ To prevent business logic from becoming tangled with framework code or database 
 ```
 
 ### Dependency Inversion in Action
-* The `TransferService` (Application layer) needs to load accounts and save entries.
+* The strategies and `TransferService` (Application layer) need to load accounts, save entries and claim idempotency keys.
 * Instead of importing `org.springframework.data.jpa.repository.JpaRepository`, it depends on clean interface ports in `com.ledgerline.domain.repository`:
   * `AccountRepository`
   * `JournalEntryRepository`
-* In `com.ledgerline.infrastructure.persistence`, `JpaAccountRepository` implements the domain interface while extending Spring Data's `JpaRepository`.
-* **ArchUnit Verification**: [LayerArchitectureTest.java](file:///c:/dungeon/ledgerline/src/test/java/com/ledgerline/architecture/LayerArchitectureTest.java) executes automated static analysis on every build to guarantee that no class in `domain` or `application` ever imports anything from `infrastructure`.
+  * `IdempotencyRepository`
+* In `com.ledgerline.infrastructure.persistence`, `JpaAccountRepository` implements the domain interface while extending Spring Data's `JpaRepository`, and `JdbcIdempotencyRepository` implements its port with plain JDBC (it needs `ON CONFLICT`, which JPA cannot express). The application never knows which technology is behind a port.
+* **ArchUnit Verification**: [LayerArchitectureTest.java](../src/test/java/com/ledgerline/architecture/LayerArchitectureTest.java) executes automated static analysis on every build to guarantee that no class in `domain` or `application` ever imports anything from `infrastructure`, that the domain never imports Spring, and that the application never imports JPA, Hibernate, JDBC, Spring Data or HTTP classes.
 
 ---
 
@@ -192,3 +199,82 @@ To prevent business logic from becoming tangled with framework code or database 
    * *"We use a PostgreSQL `CONSTRAINT TRIGGER ... DEFERRABLE INITIALLY DEFERRED`. This permits row-by-row insertion within the transaction but enforces the zero-sum invariant across all legs at transaction commit time."*
 4. **Why use integer minor units instead of floating point?**
    * *"IEEE 754 binary floating-point representation causes inexact fractions (e.g. $0.1 + 0.2 \ne 0.3$), leading to compounding balance drift. Storing cents as `BIGINT` ensures exact, deterministic arithmetic."*
+
+---
+
+## 8. Week 3: Three Ways to Stop Lost Updates
+
+All three strategies solve the same problem: two transfers read the hot account's balance (say 1000), each subtracts 100, and each writes back 900. One withdrawal vanishes. The difference between the strategies is **when** each one finds out about the conflict.
+
+| | A: Ordered pessimistic | B: Optimistic + jitter | C: Atomic conditional |
+|---|---|---|---|
+| When conflict is detected | Before reading (wait for the lock) | At commit (version mismatch) | Inside the UPDATE (DB re-checks the row) |
+| What the loser does | Waits | Throws away all work and retries | Waits, then the guard re-runs on fresh data |
+| Who does the arithmetic | Java | Java | PostgreSQL |
+| Hot account result (Week 3 data) | ~150 tx/s, 0% rejected | ~90 tx/s, **~62% rejected** | ~215 tx/s, 0% rejected, worst p99 |
+
+### Why B collapses on a hot row
+With 32 writers on one row, each round has 1 winner and 31 losers. Each loser re-reads, recomputes and collides again. Retries add load at exactly the moment the system is saturated. Optimistic locking is a bet that conflicts are rare. On a hot account they are constant, so the bet loses. On random pairs of 100 accounts it does better (~1% rejected), but its p99 is still 2–3x the others'.
+
+### Why the retry loop must sit outside the transaction
+When a version conflict happens, Spring marks the transaction rollback-only. Retrying inside the same `@Transactional` method would reuse a doomed transaction and the same stale persistence context. The retry loop therefore sits in `TransferService`, *around* a `TransactionTemplate`: each attempt gets a fresh transaction and fresh reads. Since Week 4 that transaction also contains the idempotency claim, so a retry re-runs claim + transfer together (see §9).
+
+### Why full jitter
+Fixed backoff (always wait 10 ms) makes every loser wake up together and collide again. Exponential backoff spreads the rounds out, but losers of the same round still retry together. **Full jitter** sleeps a uniformly random time in `[0, min(cap, base·2^attempt)]`, which breaks that lockstep. (AWS Architecture Blog, "Exponential Backoff and Jitter".)
+
+### Why C needs no retries
+`UPDATE accounts SET balance = balance + :delta WHERE id = :id AND (balance + :delta >= 0 OR NOT disallow_negative_balance)`
+
+Under READ COMMITTED, if another transaction holds the row, PostgreSQL waits for it to commit and then **re-evaluates the WHERE clause against the new row version**. The overdraft guard therefore always sees the latest balance, which is why the overdraft race test gets exactly 100 successes out of 500 attempts. Multi-leg atomicity still comes from the transaction: if leg 2's guard fails, leg 1's UPDATE rolls back.
+
+### Why C has the worst tail latency
+C holds each row lock for less time (one UPDATE, then inserts and commit), so throughput is higher. But under a hot row the waiters queue on the lock, and some transactions sit behind long chains of waiters. Mean and median improve while p99 gets worse. That is the throughput-vs-tail-latency trade-off ADR-002 decided **in favour of A**: predictable p99, and every balance rule stays in `Account.applyPosting` instead of being duplicated in SQL.
+
+### Lock order: three strategies, three mechanisms
+- **A:** one statement locks every row, and PostgreSQL's `ORDER BY id` decides the order.
+- **C:** one UPDATE per row, so **Java's iteration order is the lock order**. It must match across all transactions, hence `TransferPlan.LOCK_ORDER`.
+- **B:** Hibernate issues the UPDATEs at flush time. `hibernate.order_updates=true` sorts them by primary key.
+
+The evidence that this matters: with C's ordering removed, the A↔B storm produced **471 deadlocks out of 500** transfers.
+
+### Interview one-liner
+"Pessimistic waits before it reads, optimistic pays after it writes, and a conditional update makes the database do the read-check-write in one step. On a hot account I measured optimistic rejecting about 60% of requests, while the conditional update had roughly 1.4x the throughput of pessimistic but a worse p99."
+
+---
+
+## 9. Week 4: Idempotency, or "Effectively-Once" Without Distributed Locks
+
+### The problem
+The client sends "move $25", the server commits, and the response is lost (timeout, dropped Wi-Fi, load balancer reset). The client cannot tell "never happened" from "happened, reply lost", so it retries. Without protection, that retry moves money a second time. An **idempotency key** is the client saying "this is the same request as before".
+
+### Why the key is claimed *inside* the transfer transaction
+If you record the key in one transaction and do the transfer in another, there is always a gap. Crash between them and either the key is recorded but no money moved (every retry is wrongly refused), or money moved but no key was recorded (the retry moves it again). Putting the claim, the postings and the balance updates in **one** transaction removes the gap: they commit together or vanish together.
+
+### How a concurrent duplicate is handled: `ON CONFLICT` waits
+```sql
+INSERT INTO idempotency_records (client_id, idempotency_key, request_hash)
+VALUES (?, ?, ?) ON CONFLICT (client_id, idempotency_key) DO NOTHING
+```
+An uncommitted row is invisible to other transactions, but its **unique-index entry is not**. When a duplicate hits that entry, PostgreSQL can't yet tell whether it conflicts (the original might roll back), so it **waits** for the original transaction to finish:
+* original commits → the duplicate inserts 0 rows → it reads the record and replays the response
+* original rolls back → the duplicate inserts its row and becomes the new owner
+
+This is why the hammer test gets exactly 1 effect and 499 *replays*, not 499 errors.
+
+### Why `ON CONFLICT DO NOTHING` and not "catch the unique violation"
+In PostgreSQL, any error inside a transaction **aborts the whole transaction**: every later statement fails with "current transaction is aborted". After a plain `INSERT` hits a duplicate, you could not even `SELECT` the existing record to compare hashes. `ON CONFLICT DO NOTHING` turns the conflict into "0 rows affected", which is not an error.
+
+### Why store a request hash
+A client bug could reuse key `abc` for a *different* transfer. Replaying the old answer would silently drop the new request; executing it would break the key's promise. So we fingerprint the request (SHA-256 of a canonical form) and answer `422` if it doesn't match.
+
+### Why only successes are recorded
+A failed transfer (e.g. insufficient funds) rolls back everything, including the claim. Retrying the same key later is therefore a real new attempt, which is what a user who just topped up their account expects. "At most one ledger effect" still holds.
+
+### Why the replay is rebuilt instead of stored
+Journal entries and postings are immutable (DB triggers enforce it), so `TransferResponse.from(entry)` produces exactly the original body. Storing JSON would add a serialisation layer for no gain. The replay test caught one subtle trap here: the JVM clock on Windows ticks in 100 ns steps, but PostgreSQL stores microseconds and **rounds**. The first response showed `.8898016`, the database stored `.889802`, and the replay disagreed. Entity timestamps are now truncated to microseconds when created (`LedgerTime`).
+
+### Why there is no "lease expiry" problem
+Redis-based idempotency uses a lease (`SET NX EX 60`): if the first request takes more than 60 s, the lease expires and a duplicate runs too. Here the "lock" is the original transaction itself. It can't expire while the transaction is alive, and if the process dies, PostgreSQL aborts its transaction and releases the key.
+
+### Interview one-liner
+"The idempotency claim is an `INSERT ... ON CONFLICT DO NOTHING` in the same transaction as the postings. Duplicates block on the unique index until the original commits, then replay the result. There's no lease to expire and no gap between recording the key and moving the money, and 500 concurrent duplicates produce exactly one journal entry."
