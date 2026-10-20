@@ -1,6 +1,16 @@
 package com.ledgerline.domain.model;
 
-import jakarta.persistence.*;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
+import jakarta.persistence.Table;
 
 import java.time.Instant;
 import java.util.Objects;
@@ -37,7 +47,7 @@ public class Posting {
     private String currency;
 
     @Column(name = "created_at", nullable = false, updatable = false)
-    private Instant createdAt = Instant.now();
+    private Instant createdAt = LedgerTime.now();
 
     protected Posting() {
         // Required by JPA
@@ -53,7 +63,7 @@ public class Posting {
         this.amount = amount;
         Objects.requireNonNull(currency, "Currency must not be null");
         this.currency = currency.trim().toUpperCase();
-        this.createdAt = Instant.now();
+        this.createdAt = LedgerTime.now();
     }
 
     public UUID getId() {
