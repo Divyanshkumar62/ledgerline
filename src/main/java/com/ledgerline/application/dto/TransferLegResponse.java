@@ -9,14 +9,16 @@ public record TransferLegResponse(
         UUID postingId,
         UUID accountId,
         PostingDirection direction,
-        long amountMinor
+        long amountMinor,
+        String currency
 ) {
     public static TransferLegResponse from(Posting posting) {
         return new TransferLegResponse(
                 posting.getId(),
                 posting.getAccount().getId(),
                 posting.getDirection(),
-                posting.getAmount()
+                posting.getAmount(),
+                posting.getCurrency()
         );
     }
 }

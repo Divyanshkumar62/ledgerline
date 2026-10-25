@@ -12,6 +12,8 @@ public record AccountResponse(
         String currency,
         boolean disallowNegativeBalance,
         long balance,
+        boolean frozen,
+        String ownerClientId,
         long version,
         Instant createdAt,
         Instant updatedAt
@@ -23,6 +25,8 @@ public record AccountResponse(
                 account.getCurrency(),
                 account.isDisallowNegativeBalance(),
                 account.getBalance(),
+                account.isFrozen(),
+                account.getOwnerClientId(),
                 account.getVersion(),
                 account.getCreatedAt(),
                 account.getUpdatedAt()
