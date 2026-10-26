@@ -11,7 +11,12 @@ import com.ledgerline.domain.model.AccountType;
 import com.ledgerline.domain.model.JournalEntry;
 import com.ledgerline.domain.model.PostingDirection;
 import com.ledgerline.domain.repository.AccountRepository;
+import com.ledgerline.domain.repository.FxConversionRepository;
+import com.ledgerline.domain.repository.IdempotencyRepository;
 import com.ledgerline.domain.repository.JournalEntryRepository;
+import com.ledgerline.domain.repository.OutboxRepository;
+import com.ledgerline.domain.repository.SystemAccountRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -19,6 +24,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.transaction.PlatformTransactionManager;
 
 import java.util.List;
 import java.util.UUID;
@@ -26,7 +32,10 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class TransferServiceTest {
@@ -42,7 +51,10 @@ class TransferServiceTest {
     @BeforeEach
     void setUp() {
         OrderedPessimisticStrategy strategy = new OrderedPessimisticStrategy(accountRepository, journalEntryRepository);
-        transferService = new TransferService(List.of(strategy));
+        // A mocked PlatformTransactionManager makes TransactionTemplate a pass-through
+        transferService = new TransferService(List.of(strategy), mock(IdempotencyRepository.class),
+                journalEntryRepository, mock(OutboxRepository.class), accountRepository, mock(SystemAccountRepository.class),
+                mock(FxConversionRepository.class), mock(PlatformTransactionManager.class), new SimpleMeterRegistry());
     }
 
     @Test
@@ -58,7 +70,6 @@ class TransferServiceTest {
         TransferRequest request = new TransferRequest(
                 "Reverse order request",
                 "USD",
-                "key-1",
                 List.of(
                         new TransferLegRequest(idB, PostingDirection.CREDIT, 500L),
                         new TransferLegRequest(idA, PostingDirection.DEBIT, 500L)
@@ -94,7 +105,6 @@ class TransferServiceTest {
         TransferRequest request = new TransferRequest(
                 "Missing account transfer",
                 "USD",
-                null,
                 List.of(
                         new TransferLegRequest(presentId, PostingDirection.DEBIT, 100L),
                         new TransferLegRequest(missingId, PostingDirection.CREDIT, 100L)
@@ -112,7 +122,7 @@ class TransferServiceTest {
     }
 
     @Test
-    @DisplayName("Imbalanced legs throw ImbalancedJournalEntryException and roll back")
+    @DisplayName("Imbalanced legs throw ImbalancedJournalEntryException without mutating balances")
     void executeTransfer_imbalancedLegsThrowsException() {
         UUID id1 = UUID.randomUUID();
         UUID id2 = UUID.randomUUID();
@@ -123,7 +133,6 @@ class TransferServiceTest {
         TransferRequest request = new TransferRequest(
                 "Imbalanced transfer",
                 "USD",
-                null,
                 List.of(
                         new TransferLegRequest(id1, PostingDirection.DEBIT, 500L),
                         new TransferLegRequest(id2, PostingDirection.CREDIT, 400L)
@@ -137,5 +146,8 @@ class TransferServiceTest {
                 .isInstanceOf(ImbalancedJournalEntryException.class);
 
         verify(journalEntryRepository, never()).save(any());
+        // Validation runs before any balance is touched
+        assertThat(a1.getBalance()).isEqualTo(1000L);
+        assertThat(a2.getBalance()).isEqualTo(1000L);
     }
 }

@@ -1,25 +1,22 @@
 package com.ledgerline;
 
+import com.ledgerline.integration.PostgresIntegrationTest;
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.testcontainers.postgresql.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@Testcontainers
-@SpringBootTest
-class LedgerlineApplicationTests {
+class LedgerlineApplicationTests extends PostgresIntegrationTest {
 
-    @Container
-    @ServiceConnection
-    static PostgreSQLContainer postgres =
-            new PostgreSQLContainer("postgres:16");
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
 
     @Test
-    void contextLoadsWithPostgres() {
-        assertThat(postgres.isRunning()).isTrue();
+    void contextLoadsAndFlywayAppliedTheSchema() {
+        Integer applied = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM flyway_schema_history WHERE success", Integer.class);
+        assertThat(applied).isPositive();
+        assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM postings", Integer.class)).isNotNull();
     }
 }
