@@ -38,3 +38,17 @@ out/
 
 # Local tool state (contains prompt text)
 session_memory.json
+
+# Local overrides of .env.example
+.env
+
+# Raw benchmark execution artifacts and runtime logs
+perf/k6/results/
+*.log
+*.hprof
+
+# Internal drafting notes and progress checklists
+docs/tracker.md
+docs/learning.md
+docs/feature.md
+
