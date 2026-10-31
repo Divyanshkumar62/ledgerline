@@ -1,0 +1,11 @@
+.git
+.gradle
+.idea
+.vscode
+build
+**/build
+perf
+docs
+*.md
+session_memory.json
+.env

@@ -26,3 +26,25 @@ jobs:
 
       - name: Build and run tests
         run: ./gradlew check --no-daemon
+
+  # The "stranger clones the repo and runs one command" proof (tracker Week 8), on every push.
+  smoke:
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: docker compose up --build (walkthrough exits non-zero on any failed guarantee)
+        run: docker compose up --build --exit-code-from demo
+
+      - name: App logs on failure
+        if: failure()
+        run: docker compose logs ledgerline
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
