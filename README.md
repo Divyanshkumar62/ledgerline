@@ -1,13 +1,13 @@
 # Ledger Line
 
 [![Java](https://img.shields.io/badge/Java-21-orange.svg?logo=openjdk&logoColor=white)](https://openjdk.org/projects/jdk/21/)
-[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.3.x-brightgreen.svg?logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.0.8-brightgreen.svg?logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-blue.svg?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Apache Kafka](https://img.shields.io/badge/Apache%20Kafka-3.8%20(KRaft)-black.svg?logo=apachekafka&logoColor=white)](https://kafka.apache.org/)
 [![Docker Compose](https://img.shields.io/badge/Docker%20Compose-v2-blue.svg?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> A production-grade double-entry financial ledger service in **Java 21**, **Spring Boot 3**, and **PostgreSQL 16**. Demonstrates, through empirical benchmarks and automated chaos tests, how to maintain financial invariants, idempotency, and auditability under high concurrency, network partitions, and infrastructure crashes.
+> A production-grade double-entry financial ledger service in **Java 21**, **Spring Boot 4**, and **PostgreSQL 16**. Demonstrates, through empirical benchmarks and automated chaos tests, how to maintain financial invariants, idempotency, and auditability under high concurrency, network partitions, and infrastructure crashes.
 
 ---
 

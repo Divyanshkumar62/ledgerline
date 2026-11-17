@@ -11,11 +11,9 @@
 | Document | Read it for |
 |---|---|
 | [architecture.md](architecture.md) | Diagrams: system context, layers, a transfer end to end, deployment |
-| [tracker.md](tracker.md) | The 8-week plan, what is done, and the proof for each week |
 | [feature.md](feature.md) | The full specification (what the system must do) |
 | [decision.md](decision.md) | Architecture Decision Records: *why* each choice was made (ADR-001 … 013) |
 | [flow.md](flow.md) | *How* things move: request lifecycle, idempotency, strategies, outbox relay and audit decision flows, error map, test map |
-| [learning.md](learning.md) | The concepts behind the code: double-entry, deadlocks, locking strategies, idempotency, outbox, reconciliation, chaos |
 | [bug-writeups.md](bug-writeups.md) | Real bugs from building this: symptom → root cause → fix → lesson |
 | [benchmarks/](benchmarks/) | Measured data with hardware specs: locking strategies (4 runs), k6 HTTP steady state (2 runs) |
 
