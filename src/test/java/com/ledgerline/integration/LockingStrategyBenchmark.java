@@ -2,6 +2,8 @@ package com.ledgerline.integration;
 
 import com.ledgerline.application.dto.TransferRequest;
 import com.ledgerline.application.strategy.ConcurrencyStrategyType;
+import com.ledgerline.domain.model.Account;
+import com.ledgerline.domain.model.AccountType;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,7 +20,7 @@ import java.util.stream.IntStream;
 
 /**
  * ADR-002 data: throughput, latency percentiles and rejection rate per strategy, under
- * (1) one hot source account and (2) low contention across 100 accounts.
+ * (1) one hot source account and (2) low contention across 100 accounts. ADR-014 data: {@link #hotSinkStriping()}.
  * Run with {@code ./gradlew benchmark}; the table is written to build/benchmark/locking-strategies.md.
  *
  * Closed-loop load: {@link #THREADS} workers each send the next transfer as soon as the last
@@ -64,6 +66,40 @@ class LockingStrategyBenchmark extends PostgresIntegrationTest {
         Files.createDirectories(out.getParent());
         Files.writeString(out, md);
         System.out.println(md);
+    }
+
+    /**
+     * ADR-014 data: many sources paying ONE receive-only sink (e.g. platform fees), strategy A. The sink is a plain
+     * account, then striped into 1 / 4 / 8 / 16 stripes. N = 1 is the control: it goes through the router like the
+     * others but puts every transfer on a single row, so any gain over it comes from spreading the lock, not from
+     * the code path. (The existing hot-account scenario is a hot SOURCE, which striping cannot help.)
+     * Run alone with {@code ./gradlew benchmark --tests '*LockingStrategyBenchmark.hotSinkStriping'}.
+     */
+    @Test
+    void hotSinkStriping() throws Exception {
+        StringBuilder md = new StringBuilder("# Hot-sink striping benchmark (ADR-014)\n\n")
+                .append(environment()).append('\n')
+                .append("| Scenario | Strategy | Succeeded | Rejected | Rejection % | Throughput (tx/s) | p50 ms | p95 ms | p99 ms | max ms |\n")
+                .append("|---|---|---|---|---|---|---|---|---|---|\n");
+        ConcurrencyStrategyType strategy = ConcurrencyStrategyType.ORDERED_PESSIMISTIC;
+        List<UUID> sources = IntStream.range(0, 100).mapToObj(i -> fundedAccount(RICH).getId()).toList();
+
+        UUID plain = accountRepository.save(new Account(AccountType.ASSET, "USD", false)).getId();
+        md.append(row("Hot sink (100 sources -> 1 sink), unstriped", strategy, sinkLoad(sources, plain)));
+        for (int stripes : new int[] {1, 4, 8, 16}) {
+            UUID sink = stripedAccount(stripes, Account.SYSTEM_OWNER).getId();
+            md.append(row("Hot sink (100 sources -> 1 sink), " + stripes + " stripe" + (stripes == 1 ? " (control)" : "s"),
+                    strategy, sinkLoad(sources, sink)));
+        }
+
+        Path out = Path.of("build", "benchmark", "hot-sink-striping.md");
+        Files.createDirectories(out.getParent());
+        Files.writeString(out, md);
+        System.out.println(md);
+    }
+
+    private static IntFunction<TransferRequest> sinkLoad(List<UUID> sources, UUID sink) {
+        return i -> transfer(sources.get(new SplittableRandom(i).nextInt(sources.size())), sink, 1);
     }
 
     private String row(String scenario, ConcurrencyStrategyType strategy, IntFunction<TransferRequest> load) throws Exception {
