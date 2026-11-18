@@ -54,6 +54,17 @@ public class Account {
     @Column(name = "system_purpose", length = 32, updatable = false)
     private String systemPurpose;
 
+    /** ADR-014: stripe count of a striped parent (0 otherwise). A parent holds no postings; its balance is the sum of its stripes. */
+    @Column(name = "stripe_count", nullable = false, updatable = false)
+    private int stripeCount;
+
+    /** ADR-014: set on a stripe only. Stripes are real accounts: same type, currency and owner as the parent. */
+    @Column(name = "parent_account_id", updatable = false)
+    private UUID parentAccountId;
+
+    @Column(name = "stripe_index", updatable = false)
+    private Integer stripeIndex;
+
     @Version
     @Column(nullable = false)
     private long version;
@@ -84,6 +95,27 @@ public class Account {
         this.balance = 0L;
         this.createdAt = LedgerTime.now();
         this.updatedAt = LedgerTime.now();
+    }
+
+    /**
+     * A striped parent (ADR-014). Receive-only by definition, so it never has a balance check; the stripes
+     * themselves are created with {@link #stripeOf(Account, int)} once the parent has an id.
+     */
+    public static Account striped(AccountType type, String currency, String ownerClientId, int stripeCount) {
+        Account parent = new Account(type, currency, false, ownerClientId);
+        parent.stripeCount = stripeCount;
+        return parent;
+    }
+
+    /** Stripe {@code index} of a saved striped parent. */
+    public static Account stripeOf(Account parent, int index) {
+        if (parent.getId() == null || parent.stripeCount == 0) {
+            throw new IllegalArgumentException("Stripes need a saved, striped parent");
+        }
+        Account stripe = new Account(parent.type, parent.currency, false, parent.ownerClientId);
+        stripe.parentAccountId = parent.getId();
+        stripe.stripeIndex = index;
+        return stripe;
     }
 
     /**
@@ -161,6 +193,18 @@ public class Account {
         if (frozen) {
             throw new AccountFrozenException(id);
         }
+    }
+
+    public int getStripeCount() {
+        return stripeCount;
+    }
+
+    public boolean isStriped() {
+        return stripeCount > 0;
+    }
+
+    public UUID getParentAccountId() {
+        return parentAccountId;
     }
 
     public boolean isFrozen() {
