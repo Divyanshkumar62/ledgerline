@@ -14,19 +14,28 @@ public record AccountResponse(
         long balance,
         boolean frozen,
         String ownerClientId,
+        int stripeCount,
+        UUID parentAccountId,
         long version,
         Instant createdAt,
         Instant updatedAt
 ) {
     public static AccountResponse from(Account account) {
+        return from(account, account.getBalance());
+    }
+
+    /** {@code balance} is passed in for a striped parent, whose balance is the sum of its stripes (ADR-014). */
+    public static AccountResponse from(Account account, long balance) {
         return new AccountResponse(
                 account.getId(),
                 account.getType(),
                 account.getCurrency(),
                 account.isDisallowNegativeBalance(),
-                account.getBalance(),
+                balance,
                 account.isFrozen(),
                 account.getOwnerClientId(),
+                account.getStripeCount(),
+                account.getParentAccountId(),
                 account.getVersion(),
                 account.getCreatedAt(),
                 account.getUpdatedAt()
