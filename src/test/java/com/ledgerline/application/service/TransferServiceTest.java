@@ -15,6 +15,7 @@ import com.ledgerline.domain.repository.FxConversionRepository;
 import com.ledgerline.domain.repository.IdempotencyRepository;
 import com.ledgerline.domain.repository.JournalEntryRepository;
 import com.ledgerline.domain.repository.OutboxRepository;
+import com.ledgerline.domain.repository.StripeRepository;
 import com.ledgerline.domain.repository.SystemAccountRepository;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
@@ -54,7 +55,8 @@ class TransferServiceTest {
         // A mocked PlatformTransactionManager makes TransactionTemplate a pass-through
         transferService = new TransferService(List.of(strategy), mock(IdempotencyRepository.class),
                 journalEntryRepository, mock(OutboxRepository.class), accountRepository, mock(SystemAccountRepository.class),
-                mock(FxConversionRepository.class), mock(PlatformTransactionManager.class), new SimpleMeterRegistry());
+                mock(FxConversionRepository.class),
+                new StripeRouter(mock(StripeRepository.class)), mock(PlatformTransactionManager.class), new SimpleMeterRegistry());
     }
 
     @Test

@@ -96,6 +96,15 @@ public abstract class PostgresIntegrationTest {
         return accountRepository.save(new Account(AccountType.ASSET, "USD", true, owner));
     }
 
+    /** A receive-only ASSET account split into {@code stripes} stripes (ADR-014), created like the API does. */
+    protected Account stripedAccount(int stripes, String owner) {
+        Account parent = accountRepository.save(Account.striped(AccountType.ASSET, "USD", owner, stripes));
+        for (int i = 0; i < stripes; i++) {
+            accountRepository.save(Account.stripeOf(parent, i));
+        }
+        return parent;
+    }
+
     protected Account fundedAccount(long amountMinor) {
         return fundedAccount(amountMinor, Account.SYSTEM_OWNER);
     }
