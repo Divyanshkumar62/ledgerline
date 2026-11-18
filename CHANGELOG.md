@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Hot-account striping (ADR-014):** `stripeCount` on `POST /api/v1/accounts` splits a receive-only account into 1 to 64 stripes. Transfers are routed to one stripe chosen deterministically from the idempotency key; `GET /accounts/{id}` returns the summed balance and the statement merges the stripes by `seq`. Debits of a striped account and direct use of a stripe are rejected; CHECK constraints and a trigger (migration V7) enforce receive-only in the database.
+- New benchmark scenario `LockingStrategyBenchmark.hotSinkStriping`: many sources paying one sink, unstriped vs 1 (control) / 4 / 8 / 16 stripes.
+
+### Changed
+- `AccountResponse` gains `stripeCount` and `parentAccountId`; `CreateAccountRequest` gains the optional `stripeCount`.
+
 ## [0.1.0] — 2026-10-20
 
 First complete release of the v0.1 scope ([documentation](docs/README.md)).
