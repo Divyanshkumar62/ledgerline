@@ -83,3 +83,40 @@ Same harness and machine. What changed in the code since runs 1–2: the optimis
 - **B** still rejects 60–63% on a hot account.
 - The ADR-002 decision (default A) stands: the hot-account tail is the deciding risk, and balance rules stay in one
   place. The low-contention gap is now real but small; it is recorded in ADR-002 as the trade-off being accepted.
+
+
+---
+
+## Hot-sink striping (ADR-014), 2026-11-17
+
+Scenario added in [`LockingStrategyBenchmark.hotSinkStriping`](../../src/test/java/com/ledgerline/integration/LockingStrategyBenchmark.java): 100 funded sources pay **one receive-only sink**, strategy A, same harness and machine as above (32 workers, 3,000 measured transfers + 300 warm-up). The sink is a plain account, then a striped account with 1 / 4 / 8 / 16 stripes. **1 stripe is the control**: it goes through the router like the others but puts every transfer on a single row, so any gain over it comes from spreading the lock, not from the new code path. (The hot scenario above is a hot *source*, which striping cannot help, so it is not used here.)
+
+**Conditions, not ideal:** laptop on battery (Balanced power plan), other applications open; host CPU was not sampled for these two runs (it averaged 19% in a sample taken minutes later). Treat absolute numbers as indicative and the ratios as the finding. The two runs were executed back to back.
+
+### Run A
+
+| Scenario | Strategy | Succeeded | Rejected | Rejection % | Throughput (tx/s) | p50 ms | p95 ms | p99 ms | max ms |
+|---|---|---|---|---|---|---|---|---|---|
+| Hot sink (100 sources -> 1 sink), unstriped | ORDERED_PESSIMISTIC | 3000 | 0 | 0.0 | 103 | 329.8 | 409.2 | 433.5 | 575.5 |
+| Hot sink (100 sources -> 1 sink), 1 stripe (control) | ORDERED_PESSIMISTIC | 3000 | 0 | 0.0 | 105 | 317.6 | 401.2 | 516.3 | 586.1 |
+| Hot sink (100 sources -> 1 sink), 4 stripes | ORDERED_PESSIMISTIC | 3000 | 0 | 0.0 | 367 | 40.6 | 305.6 | 370.2 | 452.2 |
+| Hot sink (100 sources -> 1 sink), 8 stripes | ORDERED_PESSIMISTIC | 3000 | 0 | 0.0 | 632 | 31.3 | 153.6 | 222.6 | 366.6 |
+| Hot sink (100 sources -> 1 sink), 16 stripes | ORDERED_PESSIMISTIC | 3000 | 0 | 0.0 | 687 | 31.2 | 130.7 | 219.8 | 590.9 |
+
+### Run B
+
+| Scenario | Strategy | Succeeded | Rejected | Rejection % | Throughput (tx/s) | p50 ms | p95 ms | p99 ms | max ms |
+|---|---|---|---|---|---|---|---|---|---|
+| Hot sink (100 sources -> 1 sink), unstriped | ORDERED_PESSIMISTIC | 3000 | 0 | 0.0 | 103 | 317.7 | 384.5 | 463.5 | 526.4 |
+| Hot sink (100 sources -> 1 sink), 1 stripe (control) | ORDERED_PESSIMISTIC | 3000 | 0 | 0.0 | 112 | 292.1 | 335.4 | 423.7 | 488.5 |
+| Hot sink (100 sources -> 1 sink), 4 stripes | ORDERED_PESSIMISTIC | 3000 | 0 | 0.0 | 364 | 57.9 | 251.8 | 352.1 | 560.4 |
+| Hot sink (100 sources -> 1 sink), 8 stripes | ORDERED_PESSIMISTIC | 3000 | 0 | 0.0 | 600 | 32.0 | 164.6 | 253.6 | 490.8 |
+| Hot sink (100 sources -> 1 sink), 16 stripes | ORDERED_PESSIMISTIC | 3000 | 0 | 0.0 | 771 | 30.7 | 105.4 | 153.0 | 364.4 |
+
+### Reading the numbers
+
+* **Throughput scales with stripes, then flattens:** about 103 tx/s on one row; 364-367 with 4 stripes (3.5x); 600-632 with 8 (6x); 687-771 with 16 (6.7-7.5x). The step from 8 to 16 is small and noisy: past that point the limit moves from the sink's row locks to the shared costs (commit fsync through the Docker VM, the 32-connection pool, the 100 source rows).
+* **The control is flat** (105 and 112 tx/s vs 103 unstriped), so the router itself costs nothing measurable at this resolution.
+* **Median improves far more than the tail:** p50 falls from about 320 ms to 31 ms (8-16 stripes), but p99 only from 433-463 ms to 153-254 ms. Four stripes barely moved p99 (352-370 ms). Do not quote the throughput gain as a latency gain.
+* **Variance:** A-vs-B differences of 10-20% on the 8 and 16-stripe rows (632/600, 687/771) are within what this machine does run to run (see Runs 1-3 above). No claim is made about 8 vs 16.
+* **Scope of the claim:** this measures one shape (many sources, one receive-only sink). It says nothing about a hot source, and it does not include the O(N) balance read.

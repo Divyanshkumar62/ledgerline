@@ -488,3 +488,49 @@ Drift means two numbers disagree, and only a human can decide which one is true,
 * a manual freeze blocks both directions; the reason is mandatory; clients get 403
 
 Mutation-checked: with the clean-audit guard removed, the unfreeze test fails.
+
+
+---
+
+## ADR-014: Hot-Account Striping for Receive-Only Accounts
+
+* **Status**: Accepted (implements the stretch goal in feature.md §3.4; builds on ADR-002)
+* **Date**: 2026-11-17
+* **Deciders**: Divyansh Kumar
+
+### Context
+ADR-002 measured the ceiling of a single hot account: every transfer touching it takes a row lock, so throughput is capped at roughly 100 tx/s on the benchmark machine however many workers there are. That benchmark's hot account is a *source*. A hot account that only *receives* money (platform fee revenue, a settlement account) has the same ceiling for the same reason, and it is the case where splitting the row is safe: nothing ever needs to check its balance.
+
+### Decision
+An account can be created with `stripeCount` (1 to 64). It becomes a **parent** with that many **stripes**, which are ordinary accounts (same type, currency, owner) linked by `parent_account_id` and `stripe_index` (migration V7).
+
+1. **Routing.** `StripeRouter` runs inside the transfer transaction, before the strategy locks anything, and rewrites each leg that names a striped parent onto one stripe. The stripe is just another account in the lock set, so canonical lock ordering (ADR-002), zero-sum, audit and all three strategies are unchanged.
+2. **The stripe is chosen deterministically** from the idempotency reference (`clientId:key`): a name-based UUID (MD5 of the bytes) of the reference, taken modulo N. A retry of the same request lands on the same stripe, on every node, after every restart. The internal path has no reference and picks at random.
+3. **Receive-only is enforced, not assumed.**
+   * A leg that would lower the parent's balance is rejected with 400.
+   * A stripe cannot be named directly (400), so the rule cannot be bypassed through it.
+   * The database refuses `disallow_negative_balance = true` on a parent or a stripe, nested striping, and `stripe_count` outside 0..64 (CHECK constraints).
+   * A trigger rejects any posting on a parent, so even code that skips the router cannot write one.
+4. **Read model.** `GET /accounts/{parent}` returns `SUM(stripe balances)` in one statement. The statement endpoint merges the stripes' postings by `seq` (one global sequence) in a REPEATABLE READ transaction, so the summed balance and the postings come from one snapshot.
+5. **Audit** works per stripe, unchanged. The parent's cached balance stays 0 and it has no postings, so it audits clean.
+
+### Why deterministic hashing, not random
+The spec said "pick one randomly". Random is fine for load, but a retry that lands on a different stripe would still be caught by the idempotency claim, which is keyed on the request and not the stripe, and would replay the original journal entry. So random would not break correctness; deterministic is chosen because the stripe then reproduces from the key alone, which makes a request's effect explainable and testable, at the cost of one MD5 per transfer.
+
+### Why credit-only
+A balance check (`balance + delta >= 0`) needs the one true balance, which no longer exists as a single row. Reading all stripes under lock would reintroduce the contention. A receive-only account has no check, so each stripe can take its own postings independently and the sum is exact whenever it is read.
+
+### Consequences
+* Reading a striped parent's balance costs O(N) rows (N is at most 64) instead of one.
+* **Debits from a striped account are not supported.** Sweeping a striped account (moving its total elsewhere) needs a design of its own: it must lock every stripe in canonical order. Out of scope, noted as future work.
+* The stripe count is fixed at creation. Re-striping a live account would need a migration of postings, so it is not offered.
+* Striping helps only when contention is on the *receiving* row. A hot source gains nothing.
+* The router adds one indexed query per transfer (layout lookup). ponytail: cache layouts in memory if it ever shows in a profile; they never change after creation.
+
+### Proof
+* `StripedAccountStressTest`, for all three strategies: 500 concurrent credits into one 8-stripe account → Σ stripes = total credited, Σ sources = initial - credited, every stripe's cached balance = its postings, the parent has no postings and a 0 cached balance, every stripe received load, audit clean, zero `40P01`.
+* Idempotent retry replays the same entry on the same stripe.
+* `StripeRouterTest`: determinism per reference, spread of 8,000 keys over 8 stripes within +/-15% of even, debit rejection, direct-stripe rejection, frozen parent, one stripe per parent per transfer.
+* `StripedAccountApiTest`: summed balance, merged statement with correct running balances, 400s.
+* Mutation checks: (a) router disabled → 6 of 12 tests fail; (b) receive-only check removed → 2 fail; (c) statement not merged → 1 fails; (d) trigger removed → the bypass test fails.
+* Benchmark (strategy A, 100 sources paying one sink, two runs, see [locking-strategies.md](benchmarks/locking-strategies.md)): ~103 tx/s unstriped; 4 stripes 364-367; 8 stripes 600-632; 16 stripes 687-771. A 1-stripe control is flat (105-112), so the gain comes from spreading the lock, not from the code path.

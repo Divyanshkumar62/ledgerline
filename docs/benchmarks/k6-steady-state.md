@@ -95,3 +95,31 @@ Same scenario and setup, now authenticated (the admin issues a key in `setup()`;
 **To do (owner):** re-run on a quiet machine (or a Linux host). If p99 is still over 50 ms, add a short-TTL cache for API-key lookups (ADR-011 consequence) and re-measure.
 
 Raw data: `perf/k6/results/run3-auth-*`.
+
+
+---
+
+## Runs 4 and 5 — re-run before and after hot-account striping (2026-11-17)
+
+Same scenario and authenticated setup as run 3. Runs 4 and 5 test two different builds on the same machine: **Run 4 = `main` @ `942144a` (before striping)**, **Run 5 = `feat/hot-account-striping` (router + V7 migration)**. The k6 scenario uses plain accounts only, so Run 5 answers one question: *did adding the router (one extra indexed query per transfer) cost anything on the normal path?* It does not exercise striping.
+
+**Conditions, which did NOT meet the "quiet machine" bar in the plan** (CPU under 10%, idle): the laptop was on battery (Balanced plan), host CPU averaged **19%** before Run 4 (samples 10.5, 9.7, 37.2, 21.1, 17.3 %), other applications open. Each build was started as `java -jar` on the host (port 8081) with Postgres 16 and Kafka in Docker, as in "How to reproduce". Each build was run twice back to back; the second execution is warm.
+
+| Run | Build | p50 | p90 | p95 | **p99** | max | Failed | Dropped | Replays |
+|---|---|---|---|---|---|---|---|---|---|
+| 4 | before (cold JVM) | 20.2 ms | 300.8 ms | 585.5 ms | **740.1 ms ❌** | 1.61 s | 0 | **103** | 591 |
+| 4b | before (warm) | 18.5 ms | 32.4 ms | 50.3 ms | **135.7 ms ❌** | 241 ms | 0 | 0 | 671 |
+| 5 | after (cold JVM) | 19.8 ms | 33.0 ms | 90.7 ms | **250.6 ms ❌** | 601 ms | 0 | 11 | 633 |
+| 5b | after (warm) | 18.4 ms | 26.4 ms | 44.8 ms | **187.1 ms ❌** | 350 ms | 0 | 3 | 681 |
+
+**Correctness held in all four:** 0 failed requests; replays = idempotency hits; every committed transfer published (outbox backlog 0); 0 audit discrepancies; after each build, SQL on the live database: 0 entries not zero-sum, 0 duplicate idempotency references, 0 accounts whose balance differs from their postings, 0 frozen accounts, 0 unpublished outbox events (`run4-invariants.txt`, `run5-invariants.txt`).
+
+**The latency target (p99 < 50 ms) was missed in every run and was not loosened.** Medians are identical (18.4-20.2 ms) and about 5 ms better than run 3's 23.9 ms. The p99 values (135-740 ms) are far above run 3's 74 ms and differ by 5x between two identical executions of the same build, which is a measurement environment problem, not a code signal.
+
+**What can and cannot be concluded**
+* The router did not move the median (18.4-19.8 ms before and after). That is the only supported claim.
+* Nothing can be said about p99 before vs after: 135.7 ms vs 187.1 ms (warm) is inside the 5x run-to-run spread seen on the *same* build.
+* **Run 5 ran on a database that already held Run 4's data** (about 24k entries, V7 applied on top by Flyway); Run 4 started on an empty one. The attempt to wipe the Docker volume between the builds was blocked, so it did not happen. This favours neither build in an obvious direction, but it is a difference between the two measurements.
+* Run 4 is therefore **not** the clean pre-feature baseline the plan asked for. It must be repeated plugged in, on an idle machine, before any number goes on the resume. **The resume bullet stays as it is** ("k6 load test at 200 req/s with 0 failures", no p99); 28.5 ms is still never quoted.
+
+Raw data: `perf/k6/results/run4-*`, `run4b-*`, `run5-*`, `run5b-*` (stdout, summary JSON, server-side metric snapshots, invariants, host CPU).
