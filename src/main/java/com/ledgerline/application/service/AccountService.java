@@ -11,6 +11,7 @@ import com.ledgerline.domain.model.StatementLine;
 import com.ledgerline.domain.repository.AccountRepository;
 import com.ledgerline.domain.repository.PostingRepository;
 import com.ledgerline.domain.repository.StatementRepository;
+import com.ledgerline.domain.repository.StripeRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
@@ -28,12 +29,14 @@ public class AccountService {
     private final AccountRepository accountRepository;
     private final PostingRepository postingRepository;
     private final StatementRepository statementRepository;
+    private final StripeRepository stripeRepository;
 
     public AccountService(AccountRepository accountRepository, PostingRepository postingRepository,
-                          StatementRepository statementRepository) {
+                          StatementRepository statementRepository, StripeRepository stripeRepository) {
         this.accountRepository = accountRepository;
         this.postingRepository = postingRepository;
         this.statementRepository = statementRepository;
+        this.stripeRepository = stripeRepository;
     }
 
     @Transactional
@@ -44,13 +47,30 @@ public class AccountService {
         } catch (IllegalArgumentException e) {
             throw new InvalidRequestException("Unknown ISO 4217 currency: " + currency);
         }
-        Account account = new Account(request.type(), currency, request.disallowNegativeBalance(), owner.clientId());
-        return AccountResponse.from(accountRepository.save(account));
+        if (request.stripes() == 0) {
+            Account account = new Account(request.type(), currency, request.disallowNegativeBalance(), owner.clientId());
+            return AccountResponse.from(accountRepository.save(account));
+        }
+        if (request.disallowNegativeBalance()) {
+            throw new InvalidRequestException("A striped account is receive-only, so it cannot have disallowNegativeBalance");
+        }
+        // Parent and stripes in one transaction: a parent without all of its stripes is never visible.
+        Account parent = accountRepository.save(Account.striped(request.type(), currency, owner.clientId(), request.stripes()));
+        for (int i = 0; i < request.stripes(); i++) {
+            accountRepository.save(Account.stripeOf(parent, i));
+        }
+        return AccountResponse.from(parent, 0);
     }
 
     @Transactional(readOnly = true)
     public AccountResponse getAccount(UUID id, ApiClient caller) {
-        return AccountResponse.from(visibleAccount(id, caller));
+        Account account = visibleAccount(id, caller);
+        return AccountResponse.from(account, balanceOf(account));
+    }
+
+    /** A striped parent holds nothing itself: its balance is the sum of its stripes, read in one statement. */
+    private long balanceOf(Account account) {
+        return account.isStriped() ? stripeRepository.sumStripeBalances(account.getId()) : account.getBalance();
     }
 
     /**
@@ -63,10 +83,14 @@ public class AccountService {
             throw new InvalidRequestException("limit must be between 1 and " + MAX_STATEMENT_PAGE);
         }
         Account account = visibleAccount(id, caller);
+        // A striped parent's statement is its stripes' postings merged by seq (one global sequence), with the
+        // summed balance; REPEATABLE READ keeps that sum and the postings in the same snapshot.
+        List<UUID> postingAccounts = account.isStriped() ? stripeRepository.findStripeIds(id) : List.of(id);
+        long balance = balanceOf(account);
         List<StatementLine> lines = statementRepository.page(
-                id, account.getType().getNormalBalance(), account.getBalance(), before, limit);
+                postingAccounts, account.getType().getNormalBalance(), balance, before, limit);
         Long next = lines.size() == limit ? lines.get(lines.size() - 1).seq() : null;
-        return new AccountStatementResponse(id, account.getCurrency(), account.getBalance(), lines, next);
+        return new AccountStatementResponse(id, account.getCurrency(), balance, lines, next);
     }
 
     @Transactional(readOnly = true)

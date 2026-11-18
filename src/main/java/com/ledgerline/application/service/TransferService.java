@@ -51,6 +51,7 @@ import java.util.function.Supplier;
  *   └─ transaction
  *        ├─ check the caller owns every account it names (404 otherwise)
  *        ├─ claim idempotency key (blocks on an in-flight duplicate)
+ *        ├─ route striped parents to one stripe (ADR-014)
  *        ├─ strategy.executeTransfer   (joins this transaction)
  *        ├─ link key → journal entry
  *        └─ append TransferCompleted to the outbox
@@ -76,6 +77,7 @@ public class TransferService {
     private final AccountRepository accountRepository;
     private final SystemAccountRepository systemAccountRepository;
     private final FxConversionRepository fxConversionRepository;
+    private final StripeRouter stripeRouter;
     private final TransactionTemplate transactionTemplate;
     private final MeterRegistry meterRegistry;
 
@@ -86,6 +88,7 @@ public class TransferService {
                            AccountRepository accountRepository,
                            SystemAccountRepository systemAccountRepository,
                            FxConversionRepository fxConversionRepository,
+                           StripeRouter stripeRouter,
                            PlatformTransactionManager transactionManager,
                            MeterRegistry meterRegistry) {
         strategyList.forEach(s -> strategies.put(s.getType(), s));
@@ -95,6 +98,7 @@ public class TransferService {
         this.accountRepository = accountRepository;
         this.systemAccountRepository = systemAccountRepository;
         this.fxConversionRepository = fxConversionRepository;
+        this.stripeRouter = stripeRouter;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.meterRegistry = meterRegistry;
     }
@@ -214,7 +218,7 @@ public class TransferService {
 
     /** Must run inside the transaction: the event exists if and only if the transfer committed. */
     private TransferResponse transferAndPublish(ConcurrencyStrategy strategy, LedgerCommand command, String reference) {
-        TransferResponse response = strategy.executeTransfer(command, reference);
+        TransferResponse response = strategy.executeTransfer(stripeRouter.route(command, reference), reference);
         outboxRepository.append(new TransferCompleted(response.journalEntryId(), response.description(), response.currency(),
                 response.legs().stream()
                         .map(l -> new TransferCompleted.Leg(l.accountId(), l.direction(), l.amountMinor(), l.currency()))
