@@ -25,18 +25,21 @@ import com.ledgerline.domain.repository.OutboxRepository;
 import com.ledgerline.domain.repository.SystemAccountRepository;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.ConcurrencyFailureException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.time.Duration;
 import java.util.Collection;
 import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
@@ -78,8 +81,43 @@ public class TransferService {
     private final SystemAccountRepository systemAccountRepository;
     private final FxConversionRepository fxConversionRepository;
     private final StripeRouter stripeRouter;
+    private final IdempotencyFastPath idempotencyFastPath;
     private final TransactionTemplate transactionTemplate;
     private final MeterRegistry meterRegistry;
+
+    public static final IdempotencyFastPath NOOP_FAST_PATH = new IdempotencyFastPath() {
+        @Override
+        public Optional<TransferResponse> findCompleted(String clientId, String idempotencyKey, String requestHash) {
+            return Optional.empty();
+        }
+
+        @Override
+        public Lease acquireLease(String clientId, String idempotencyKey, String requestHash) {
+            return new Lease() {
+                @Override
+                public boolean acquired() {
+                    return false;
+                }
+
+                @Override
+                public void close() {
+                }
+            };
+        }
+
+        @Override
+        public Optional<TransferResponse> pollForCompleted(String clientId, String idempotencyKey, String requestHash, Duration timeout) {
+            return Optional.empty();
+        }
+
+        @Override
+        public void complete(String clientId, String idempotencyKey, String requestHash, TransferResponse response) {
+        }
+
+        @Override
+        public void releaseLease(String clientId, String idempotencyKey) {
+        }
+    };
 
     public TransferService(List<ConcurrencyStrategy> strategyList,
                            IdempotencyRepository idempotencyRepository,
@@ -91,6 +129,22 @@ public class TransferService {
                            StripeRouter stripeRouter,
                            PlatformTransactionManager transactionManager,
                            MeterRegistry meterRegistry) {
+        this(strategyList, idempotencyRepository, journalEntryRepository, outboxRepository, accountRepository,
+                systemAccountRepository, fxConversionRepository, stripeRouter, NOOP_FAST_PATH, transactionManager, meterRegistry);
+    }
+
+    @Autowired
+    public TransferService(List<ConcurrencyStrategy> strategyList,
+                           IdempotencyRepository idempotencyRepository,
+                           JournalEntryRepository journalEntryRepository,
+                           OutboxRepository outboxRepository,
+                           AccountRepository accountRepository,
+                           SystemAccountRepository systemAccountRepository,
+                           FxConversionRepository fxConversionRepository,
+                           StripeRouter stripeRouter,
+                           IdempotencyFastPath idempotencyFastPath,
+                           PlatformTransactionManager transactionManager,
+                           MeterRegistry meterRegistry) {
         strategyList.forEach(s -> strategies.put(s.getType(), s));
         this.idempotencyRepository = idempotencyRepository;
         this.journalEntryRepository = journalEntryRepository;
@@ -99,6 +153,7 @@ public class TransferService {
         this.systemAccountRepository = systemAccountRepository;
         this.fxConversionRepository = fxConversionRepository;
         this.stripeRouter = stripeRouter;
+        this.idempotencyFastPath = idempotencyFastPath != null ? idempotencyFastPath : NOOP_FAST_PATH;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.meterRegistry = meterRegistry;
     }
@@ -151,29 +206,52 @@ public class TransferService {
 
     private TransferOutcome idempotent(String clientId, String idempotencyKey, String requestHash, Collection<UUID> clientAccounts,
                                        BiFunction<ConcurrencyStrategy, String, TransferResponse> work) {
-        ConcurrencyStrategy strategy = strategy(DEFAULT_STRATEGY);
-        Timer.Sample sample = Timer.start(meterRegistry);
-        try {
-            TransferOutcome outcome = inTransactionWithRetry(strategy, () -> {
-                // Before the claim, so a request naming someone else's account never consumes a key.
-                assertOwnedBy(clientId, clientAccounts);
-                if (!idempotencyRepository.claim(clientId, idempotencyKey, requestHash)) {
-                    return replay(clientId, idempotencyKey, requestHash);
+        // Fast path: completed cache check (absorbs replays before opening any DB transaction)
+        Optional<TransferResponse> fastCached = idempotencyFastPath.findCompleted(clientId, idempotencyKey, requestHash);
+        if (fastCached.isPresent()) {
+            meterRegistry.counter("ledger.idempotency.hits").increment();
+            return new TransferOutcome(fastCached.get(), true);
+        }
+
+        // Fast path: in-flight lease absorption for concurrent stampedes
+        try (IdempotencyFastPath.Lease lease = idempotencyFastPath.acquireLease(clientId, idempotencyKey, requestHash)) {
+            if (!lease.acquired()) {
+                Optional<TransferResponse> absorbed = idempotencyFastPath.pollForCompleted(
+                        clientId, idempotencyKey, requestHash, Duration.ofMillis(1000));
+                if (absorbed.isPresent()) {
+                    meterRegistry.counter("ledger.idempotency.hits").increment();
+                    return new TransferOutcome(absorbed.get(), true);
                 }
-                TransferResponse response = work.apply(strategy, clientId + ":" + idempotencyKey);
-                idempotencyRepository.complete(clientId, idempotencyKey, response.journalEntryId());
-                return new TransferOutcome(response, false);
-            });
-            // Counted after the transaction: a rolled-back attempt must not count as a hit or a miss.
-            meterRegistry.counter(outcome.replayed() ? "ledger.idempotency.hits" : "ledger.idempotency.misses").increment();
-            stopTimer(sample, strategy, outcome.replayed() ? "replayed" : "committed");
-            return outcome;
-        } catch (RuntimeException e) {
-            if (e instanceof IdempotencyKeyReusedException) {
-                meterRegistry.counter("ledger.idempotency.mismatches").increment();
             }
-            stopTimer(sample, strategy, outcomeOf(e));
-            throw e;
+
+            ConcurrencyStrategy strategy = strategy(DEFAULT_STRATEGY);
+            Timer.Sample sample = Timer.start(meterRegistry);
+            try {
+                TransferOutcome outcome = inTransactionWithRetry(strategy, () -> {
+                    // Before the claim, so a request naming someone else's account never consumes a key.
+                    assertOwnedBy(clientId, clientAccounts);
+                    if (!idempotencyRepository.claim(clientId, idempotencyKey, requestHash)) {
+                        return replay(clientId, idempotencyKey, requestHash);
+                    }
+                    TransferResponse response = work.apply(strategy, clientId + ":" + idempotencyKey);
+                    idempotencyRepository.complete(clientId, idempotencyKey, response.journalEntryId());
+                    return new TransferOutcome(response, false);
+                });
+
+                // Populate fast path completed cache on both commit and DB replay
+                idempotencyFastPath.complete(clientId, idempotencyKey, requestHash, outcome.response());
+
+                // Counted after the transaction: a rolled-back attempt must not count as a hit or a miss.
+                meterRegistry.counter(outcome.replayed() ? "ledger.idempotency.hits" : "ledger.idempotency.misses").increment();
+                stopTimer(sample, strategy, outcome.replayed() ? "replayed" : "committed");
+                return outcome;
+            } catch (RuntimeException e) {
+                if (e instanceof IdempotencyKeyReusedException) {
+                    meterRegistry.counter("ledger.idempotency.mismatches").increment();
+                }
+                stopTimer(sample, strategy, outcomeOf(e));
+                throw e;
+            }
         }
     }
 

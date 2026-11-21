@@ -45,6 +45,18 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
 
+  redis:
+    image: redis:7-alpine
+    container_name: ledgerline-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   ledgerline:
     build: .
     image: ledgerline:0.1.0
@@ -55,11 +67,15 @@ services:
         condition: service_healthy
       kafka:
         condition: service_started
+      redis:
+        condition: service_healthy
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-ledgerline}
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-ledgerline}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-ledgerline_secret}
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
       # First admin key (dev only). Override ADMIN_KEY in .env; never reuse this value outside your machine.
       LEDGERLINE_BOOTSTRAP_ADMIN_KEY: ${ADMIN_KEY:-dev-admin-key-change-me-0123456789}
     ports:

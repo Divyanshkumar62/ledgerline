@@ -45,6 +45,7 @@ import static org.assertj.core.api.Assertions.assertThat;
         "ledgerline.outbox.relay.enabled=false",
         "ledgerline.audit.enabled=false",
         "ledgerline.retention.cron=-",
+        "ledgerline.idempotency.redis.enabled=false",
         "ledgerline.security.bootstrap-admin-key=" + PostgresIntegrationTest.ADMIN_KEY
 })
 public abstract class PostgresIntegrationTest {
